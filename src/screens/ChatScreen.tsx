@@ -64,6 +64,17 @@ export default function ChatScreen({ route, navigation }: Props) {
   // stuck showing a stale "sent" checkmark even after they'd genuinely
   // failed — e.g. the 24-hour-window case).
   const pendingStatusUpdatesRef = useRef<Map<string, StatusUpdatePayload>>(new Map());
+  // Set the instant a live "new_message" event tells us the window just
+  // reopened (see that handler below). getContact() below and this live
+  // update are two independent async paths that can race: reopening a
+  // chat right as the reopening message itself arrives kicks off a
+  // getContact() call that reflects the server's pre-message state, which
+  // can resolve *after* the live update already set windowOpen(true) —
+  // silently flipping it back to closed and leaving the agent stuck
+  // behind the banner despite the window genuinely being open. Reset per
+  // focus session so a stale "open" doesn't survive into a later,
+  // legitimately-closed one.
+  const windowReopenedLiveRef = useRef(false);
 
   const applyPendingStatus = useCallback((message: WhatomateMessage): WhatomateMessage => {
     const pending = pendingStatusUpdatesRef.current.get(message.id);
@@ -112,9 +123,15 @@ export default function ChatScreen({ route, navigation }: Props) {
   useFocusEffect(
     useCallback(() => {
       let isActive = true;
+      windowReopenedLiveRef.current = false;
       getContact(contact.id)
         .then((fresh) => {
-          if (isActive) setWindowOpen(fresh.service_window_open);
+          // A live update that arrived while this was in flight already
+          // knows better than this now-possibly-stale response — don't
+          // let it re-close a window that's actually open.
+          if (isActive && !windowReopenedLiveRef.current) {
+            setWindowOpen(fresh.service_window_open);
+          }
         })
         .catch((err) => {
           logApiError('Failed to refresh window status:', err);
@@ -196,6 +213,7 @@ export default function ChatScreen({ route, navigation }: Props) {
       // left the "window closed" banner stuck showing even after they'd
       // genuinely written back.
       if (msg.direction === 'incoming') {
+        windowReopenedLiveRef.current = true;
         setWindowOpen(true);
       }
 
