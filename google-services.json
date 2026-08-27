@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "3606839548",
+    "project_id": "whatomate-agent-app",
+    "storage_bucket": "whatomate-agent-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:3606839548:android:01feee500290b54bebd779",
+        "android_client_info": {
+          "package_name": "biz.consyst.whatomateagent"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCmLPbHJpDCflDbNYSEy51G8bI7Ig8HNsQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
