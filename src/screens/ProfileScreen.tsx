@@ -12,6 +12,7 @@ import { getCurrentUser, updateAvailability } from '../api/me';
 import { describeApiError } from '../api/errors';
 import { logApiError } from '../api/logging';
 import { useAuth } from '../context/AuthContext';
+import AppVersionInfo from '../components/AppVersionInfo';
 import {
   getNotificationPermissionStatus,
   isSoundEnabled,
@@ -224,6 +225,7 @@ export default function ProfileScreen() {
             <Text style={styles.signOutButtonText}>Sign Out</Text>
           )}
         </TouchableOpacity>
+        <AppVersionInfo />
       </View>
     </View>
   );

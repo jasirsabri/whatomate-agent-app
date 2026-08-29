@@ -1,11 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  FlatList,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
+  SectionList,
   StyleSheet,
   Text,
   TextInput,
@@ -27,11 +27,42 @@ import { useSocket } from '../context/SocketContext';
 import MessageBubble from '../components/MessageBubble';
 import { getTeamName } from '../config';
 import { colors, radii, spacing } from '../theme';
+import { dateSectionKey, formatDateSeparator } from '../utils/formatTimestamp';
 import type { NewMessagePayload, StatusUpdatePayload } from '../ws/types';
 import type { AgentTransfer } from '../api/transfers';
 import type { WhatomateMessage } from '../types';
 
+interface DateSection {
+  key: string;
+  title: string;
+  data: WhatomateMessage[];
+}
+
 type Props = NativeStackScreenProps<RootStackParamList, 'Chat'>;
+
+/** "Aug 28, 3:45 PM (14h ago)" — the absolute time so it's checkable
+ * against WhatsApp's real 24h rule, the relative time so it's readable at
+ * a glance. */
+function formatLastInbound(dateStr: string | null): string | null {
+  if (!dateStr) return null;
+  const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return null;
+
+  const absolute = date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+  const hoursAgo = (Date.now() - date.getTime()) / 3600000;
+  const relative =
+    hoursAgo < 1
+      ? `${Math.max(0, Math.round(hoursAgo * 60))}m ago`
+      : hoursAgo < 48
+        ? `${Math.round(hoursAgo)}h ago`
+        : `${Math.round(hoursAgo / 24)}d ago`;
+  return `${absolute} (${relative})`;
+}
 
 export default function ChatScreen({ route, navigation }: Props) {
   const { contact } = route.params;
@@ -47,6 +78,12 @@ export default function ChatScreen({ route, navigation }: Props) {
   // gap where the 24h window could tick over while this exact chat is
   // already open, without needing to poll it continuously.
   const [windowOpen, setWindowOpen] = useState(contact.service_window_open);
+  // Surfaced in the closed-window banner below so a "why is this still
+  // blocked?" report comes with the actual timestamp the server is using,
+  // instead of just the boolean — the one piece of evidence that tells us
+  // whether a stuck banner is a stale flag (recent last_inbound_at, window
+  // still marked closed) or the window is genuinely >24h old.
+  const [lastInboundAt, setLastInboundAt] = useState(contact.last_inbound_at ?? null);
   // The transfer this contact is tied to, if any — drives the "Mark
   // Resolved" header button. null both while unresolved-and-loading and
   // for the legitimate case of no matching transfer (e.g. assigned some
@@ -54,7 +91,7 @@ export default function ChatScreen({ route, navigation }: Props) {
   // the right failure mode for a non-essential action like this.
   const [activeTransfer, setActiveTransfer] = useState<AgentTransfer | null>(null);
   const [resolvingTransfer, setResolvingTransfer] = useState(false);
-  const listRef = useRef<FlatList<WhatomateMessage>>(null);
+  const listRef = useRef<SectionList<WhatomateMessage, DateSection>>(null);
   // Sends fail (or succeed) asynchronously on the server — the WebSocket
   // status_update correction can arrive before the optimistic "add this
   // message to the list" step finishes, since they're two independent
@@ -64,17 +101,6 @@ export default function ChatScreen({ route, navigation }: Props) {
   // stuck showing a stale "sent" checkmark even after they'd genuinely
   // failed — e.g. the 24-hour-window case).
   const pendingStatusUpdatesRef = useRef<Map<string, StatusUpdatePayload>>(new Map());
-  // Set the instant a live "new_message" event tells us the window just
-  // reopened (see that handler below). getContact() below and this live
-  // update are two independent async paths that can race: reopening a
-  // chat right as the reopening message itself arrives kicks off a
-  // getContact() call that reflects the server's pre-message state, which
-  // can resolve *after* the live update already set windowOpen(true) —
-  // silently flipping it back to closed and leaving the agent stuck
-  // behind the banner despite the window genuinely being open. Reset per
-  // focus session so a stale "open" doesn't survive into a later,
-  // legitimately-closed one.
-  const windowReopenedLiveRef = useRef(false);
 
   const applyPendingStatus = useCallback((message: WhatomateMessage): WhatomateMessage => {
     const pending = pendingStatusUpdatesRef.current.get(message.id);
@@ -119,18 +145,19 @@ export default function ChatScreen({ route, navigation }: Props) {
   );
 
   // Refresh just the 24-hour window status on focus — see the comment on
-  // windowOpen's declaration above for why this matters.
+  // windowOpen's declaration above for why this matters. This is purely
+  // "what did the server's contact record say" — it's combined with the
+  // message-derived signal below at render time rather than here, so a
+  // stale/buggy response here can never clobber a correct read from the
+  // messages themselves (see effectiveWindowOpen).
   useFocusEffect(
     useCallback(() => {
       let isActive = true;
-      windowReopenedLiveRef.current = false;
       getContact(contact.id)
         .then((fresh) => {
-          // A live update that arrived while this was in flight already
-          // knows better than this now-possibly-stale response — don't
-          // let it re-close a window that's actually open.
-          if (isActive && !windowReopenedLiveRef.current) {
+          if (isActive) {
             setWindowOpen(fresh.service_window_open);
+            setLastInboundAt(fresh.last_inbound_at ?? null);
           }
         })
         .catch((err) => {
@@ -141,6 +168,41 @@ export default function ChatScreen({ route, navigation }: Props) {
       };
     }, [contact.id])
   );
+
+  // Whatomate's own service_window_open/last_inbound_at fields have been
+  // observed lagging behind reality — a message visible via GetMessages
+  // with the contact record's window-tracking fields still reflecting no
+  // inbound at all (last_inbound_at came back entirely absent, which is
+  // omitempty for "unset" server-side, despite an inbound message minutes
+  // old sitting right there in the thread). The message list itself is
+  // trustworthy, so it's combined with the contact-record signal at the
+  // point of use (effectiveWindowOpen/effectiveLastInboundAt below) as a
+  // pure OR rather than one side effect overwriting the other — a
+  // stateful "whichever update ran last wins" approach was exactly what
+  // let a correct open state flip back to an incorrect closed one the
+  // next time getContact() resolved with the server's stale value.
+  const lastIncomingMessage = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].direction === 'incoming') return messages[i];
+    }
+    return undefined;
+  }, [messages]);
+
+  const messagesSayWindowOpen = useMemo(() => {
+    if (!lastIncomingMessage) return false;
+    const inboundAt = new Date(lastIncomingMessage.created_at).getTime();
+    return !Number.isNaN(inboundAt) && Date.now() - inboundAt < 24 * 60 * 60 * 1000;
+  }, [lastIncomingMessage]);
+
+  const effectiveWindowOpen = windowOpen || messagesSayWindowOpen;
+
+  const effectiveLastInboundAt = useMemo(() => {
+    if (!lastIncomingMessage) return lastInboundAt;
+    if (!lastInboundAt) return lastIncomingMessage.created_at;
+    const fromMessages = new Date(lastIncomingMessage.created_at).getTime();
+    const fromServer = new Date(lastInboundAt).getTime();
+    return fromMessages > fromServer ? lastIncomingMessage.created_at : lastInboundAt;
+  }, [lastIncomingMessage, lastInboundAt]);
 
   // Look up whether this contact has a matching active transfer, to know
   // whether to offer "Mark Resolved" at all — fails silently (no error
@@ -179,6 +241,57 @@ export default function ChatScreen({ route, navigation }: Props) {
     }, [contact.id, setActiveContact])
   );
 
+  // Grouped into WhatsApp-style date sections — messages arrive already
+  // sorted ascending by created_at (see fetchMessages/the live-append
+  // above), so a single consecutive pass is enough; no need to re-sort
+  // within groups.
+  const sections = useMemo((): DateSection[] => {
+    const groups: DateSection[] = [];
+    for (const message of messages) {
+      const key = dateSectionKey(message.created_at);
+      const current = groups[groups.length - 1];
+      if (current && current.key === key) {
+        current.data.push(message);
+      } else {
+        groups.push({ key, title: formatDateSeparator(message.created_at), data: [message] });
+      }
+    }
+    return groups;
+  }, [messages]);
+
+  // SectionList has no scrollToEnd (unlike FlatList — its items span
+  // sections, so RN only gives it scrollToLocation by section+item index).
+  // viewPosition: 1 pins the target item to the bottom of the viewport,
+  // the closest equivalent to "scrolled to the end."
+  const scrollToBottom = useCallback(
+    (animated: boolean) => {
+      const lastSectionIndex = sections.length - 1;
+      if (lastSectionIndex < 0) return;
+      const lastItemIndex = sections[lastSectionIndex].data.length - 1;
+      listRef.current?.scrollToLocation({
+        sectionIndex: lastSectionIndex,
+        itemIndex: lastItemIndex,
+        viewPosition: 1,
+        animated,
+      });
+    },
+    [sections]
+  );
+  // Without getItemLayout (impractical here — bubble height varies with
+  // message length), scrollToLocation targeting a row outside the
+  // currently-measured window doesn't just warn, it throws — RN's
+  // VirtualizedList requires onScrollToIndexFailed to be present at all
+  // before it'll degrade to a retry instead of a hard invariant crash.
+  // This was crashing the screen on open for any chat long enough that
+  // the last message isn't already within the initial render window.
+  // Capped so a pathological case (never converging) can't retry forever.
+  const scrollRetriesRef = useRef(0);
+  const handleScrollToIndexFailed = useCallback(() => {
+    if (scrollRetriesRef.current >= 5) return;
+    scrollRetriesRef.current += 1;
+    setTimeout(() => scrollToBottom(false), 300);
+  }, [scrollToBottom]);
+
   // The keyboard opening shrinks the list's visible height without
   // changing its content size, so onContentSizeChange (below) never
   // fires for it — the list stayed at its old scroll position, leaving
@@ -188,12 +301,10 @@ export default function ChatScreen({ route, navigation }: Props) {
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
     const subscription = Keyboard.addListener(showEvent, () => {
-      requestAnimationFrame(() => {
-        listRef.current?.scrollToEnd({ animated: true });
-      });
+      requestAnimationFrame(() => scrollToBottom(true));
     });
     return () => subscription.remove();
-  }, []);
+  }, [scrollToBottom]);
 
   // Live updates for this specific thread. new_message/status_update are
   // broadcast org-wide by the server, so we filter to this contact
@@ -205,17 +316,10 @@ export default function ChatScreen({ route, navigation }: Props) {
       const msg = payload as NewMessagePayload;
       if (msg.contact_id !== contact.id) return;
 
-      // A fresh incoming message unambiguously means the 24-hour window
-      // just (re)opened — service_window_open is computed server-side
-      // from exactly this (last_inbound_at within 24h), so there's no
-      // need to wait for the next focus-triggered refetch to find out.
-      // Without this, staying on an open chat while the customer replies
-      // left the "window closed" banner stuck showing even after they'd
-      // genuinely written back.
-      if (msg.direction === 'incoming') {
-        windowReopenedLiveRef.current = true;
-        setWindowOpen(true);
-      }
+      // No explicit windowOpen handling needed here for an incoming
+      // message — appending it to `messages` below already feeds
+      // messagesSayWindowOpen (see above), which reopens the banner the
+      // instant it arrives without waiting for a focus-triggered refetch.
 
       setMessages((prev) => {
         if (prev.some((m) => m.id === msg.id)) return prev;
@@ -343,6 +447,14 @@ export default function ChatScreen({ route, navigation }: Props) {
 
   const renderItem = ({ item }: { item: WhatomateMessage }) => <MessageBubble message={item} />;
 
+  const renderSectionHeader = ({ section }: { section: DateSection }) => (
+    <View style={styles.dateSeparatorRow}>
+      <View style={styles.dateSeparatorPill}>
+        <Text style={styles.dateSeparatorText}>{section.title}</Text>
+      </View>
+    </View>
+  );
+
   if (loading) {
     return (
       <View style={styles.centered}>
@@ -359,16 +471,19 @@ export default function ChatScreen({ route, navigation }: Props) {
     >
       {errorMessage ? <Text style={styles.error}>{errorMessage}</Text> : null}
 
-      <FlatList
+      <SectionList
         ref={listRef}
-        data={messages}
+        sections={sections}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
+        renderSectionHeader={renderSectionHeader}
+        stickySectionHeadersEnabled
         contentContainerStyle={styles.listContent}
-        onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
+        onContentSizeChange={() => scrollToBottom(false)}
+        onScrollToIndexFailed={handleScrollToIndexFailed}
       />
 
-      {windowOpen ? (
+      {effectiveWindowOpen ? (
         <View style={styles.inputRow}>
           <View style={styles.inputWrapper}>
             <TextInput
@@ -395,12 +510,19 @@ export default function ChatScreen({ route, navigation }: Props) {
       ) : (
         <View style={styles.windowClosedBanner}>
           <Ionicons name="time-outline" size={18} color={colors.statusWaiting} />
-          <Text style={styles.windowClosedText}>
-            WhatsApp's 24-hour reply window has closed for this chat. You
-            can't send a message until the customer writes again — a
-            template message can re-open it from the Whatomate web
-            dashboard.
-          </Text>
+          <View style={styles.windowClosedTextGroup}>
+            <Text style={styles.windowClosedText}>
+              WhatsApp's 24-hour reply window has closed for this chat. You
+              can't send a message until the customer writes again — a
+              template message can re-open it from the Whatomate web
+              dashboard.
+            </Text>
+            {formatLastInbound(effectiveLastInboundAt) ? (
+              <Text style={styles.windowClosedDetail}>
+                Their last message: {formatLastInbound(effectiveLastInboundAt)}
+              </Text>
+            ) : null}
+          </View>
         </View>
       )}
     </KeyboardAvoidingView>
@@ -411,6 +533,30 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.chatBackground },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   listContent: { padding: spacing.md },
+  // The row itself stays transparent (no background) so it can sit
+  // "stuck" at the top via stickySectionHeadersEnabled without painting
+  // a solid bar over the messages scrolling underneath — only the pill
+  // inside it is visible, matching WhatsApp's floating date label.
+  dateSeparatorRow: {
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+  },
+  dateSeparatorPill: {
+    backgroundColor: colors.chipBackground,
+    borderRadius: radii.chip,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 1,
+    elevation: 1,
+  },
+  dateSeparatorText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
   error: {
     color: colors.error,
     textAlign: 'center',
@@ -452,11 +598,20 @@ const styles = StyleSheet.create({
     padding: spacing.md,
     backgroundColor: colors.statusWaitingBg,
   },
-  windowClosedText: {
+  windowClosedTextGroup: {
     flex: 1,
     marginLeft: spacing.sm,
+  },
+  windowClosedText: {
     fontSize: 13,
     lineHeight: 18,
     color: colors.statusWaiting,
+  },
+  windowClosedDetail: {
+    fontSize: 12,
+    lineHeight: 16,
+    marginTop: 4,
+    color: colors.statusWaiting,
+    opacity: 0.85,
   },
 });

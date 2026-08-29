@@ -30,6 +30,7 @@ import {
   setPushBridgeUrl,
 } from '../config';
 import { clearCredentials, hasSavedCredentials } from '../api/savedCredentials';
+import AppVersionInfo from '../components/AppVersionInfo';
 import { colors } from '../theme';
 
 // Only reachable from the login screen (see navigation/index.tsx) — there's
@@ -255,6 +256,8 @@ export default function SettingsScreen() {
             </TouchableOpacity>
           </View>
         )}
+
+        <AppVersionInfo />
       </ScrollView>
     </KeyboardAvoidingView>
   );
