@@ -154,9 +154,12 @@ details, not settings.
   WebSocket correction can arrive before the optimistic add of the
   message it's about, since they're independent async paths; it's now
   held and applied the moment that message actually appears, rather than
-  silently dropped). Also gains a header **Mark Resolved** button — see
-  the fuller explanation under Queue below for why this, not Queue, is
-  the primary place for it.
+  silently dropped). Shows a quiet advisory banner — "No active handoff
+  found for this conversation — the chatbot may also respond" — whenever
+  this contact has no currently-active transfer, so an agent knows the
+  bot could reply too rather than assuming the conversation is exclusively
+  theirs. This screen used to have its own **Mark Resolved** button, but
+  that was removed — see the fuller explanation under Queue below.
 - **Queue** (manager-only) — visible only to accounts with **Transfers:
   Write** (checked live via `GET /api/me` and the same permission logic
   Whatomate's own backend uses — see `src/hooks/useCanManageQueue.ts`).
@@ -210,14 +213,18 @@ details, not settings.
   than waiting on a refetch, since "resumed" is a terminal state — no
   further update will ever arrive for it.
 
-  **This is the secondary place for Mark Resolved, though** — the primary
-  one is the Chat screen itself (see below), since the agent handling a
-  conversation is the one who actually knows it's done, and Whatomate's
-  own permission model backs this up (`resume` needs no special
-  permission, unlike `assign` — suggesting it's meant to belong to
-  whoever's doing the work). Regular agents never see the Queue tab at
-  all, so without the Chat-screen version, most of the app's users would
-  have no way to resolve anything themselves.
+  **Queue is the only place this app offers Mark Resolved now** — an
+  earlier version put a second copy of this button directly in the Chat
+  screen, on the theory that the agent handling a conversation is the one
+  who actually knows it's done. That was removed after finding, live,
+  that resuming a transfer doesn't clear the contact's own
+  `assigned_user_id` — so tapping "resolved" from the chat silently
+  reactivated the chatbot for that contact while the conversation kept
+  sitting in the agent's own "My Chats" exactly as before, with no
+  visible change to show for it. Confusing agents with an action whose
+  effect doesn't match what it visibly promises was worse than not
+  offering it there at all; Queue is manager-only, but at least an
+  unambiguous, correctly-reflected action.
 - **Live search** — filters the conversation list on every keystroke, no
   network calls, matching name, phone number, or the last message's
   preview text (`last_message_preview` — already loaded for every
@@ -374,6 +381,25 @@ deployment's compatibility rather than chasing a version number:
   the team queue, not just a flag flip.
 - Permission checks mirror Whatomate's own `HasPermission()` — a
   super-admin account bypasses the explicit permission list entirely.
+- **Two independent, non-overlapping ways a contact becomes "assigned"**:
+  `PUT /api/contacts/{id}/assign` sets `assigned_user_id` directly with no
+  transfer record involved at all, while a chatbot flow's Transfer node
+  creates an `AgentTransfer` (`status: active`, its own separate
+  `agent_id`) that may or may not ever get `assigned_user_id` set — in
+  practice, whatever actually sets `assigned_user_id` (confirmed via
+  live testing to happen for flow-initiated transfers too, likely some
+  auto-assignment business logic on the org side) is the one thing every
+  "is this mine" check in this app can rely on; `transfer.agent_id` alone
+  is not equivalent and misses the direct-assign path entirely.
+- **`assigned_user_id` does not clear when its transfer resumes.**
+  Verified directly: resuming a transfer via `PUT
+  /api/chatbot/transfers/{id}/resume` hands the conversation back to the
+  chatbot, but the contact's own `assigned_user_id` stays exactly as it
+  was — confirmed live, minutes after a resume, still showing assigned.
+  This is a genuine gap in Whatomate itself, not fixable from a client;
+  it's why this app no longer offers "Mark Resolved" from the Chat screen
+  (see "Known limitations") and instead shows an advisory banner when a
+  contact has no active transfer.
 
 If your instance behaves differently in any of these, the likely fix is
 adjusting the relevant `api/*.ts` file rather than assuming something

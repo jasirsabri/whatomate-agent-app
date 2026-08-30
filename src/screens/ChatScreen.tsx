@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -20,7 +19,7 @@ import type { RootStackParamList } from '../navigation';
 import { getContact } from '../api/contacts';
 import { getMessages, sendTextMessage } from '../api/messages';
 import { resolveTeamIdByName } from '../api/teams';
-import { findActiveTransferForContact, resumeTransfer } from '../api/transfers';
+import { findActiveTransferForContact } from '../api/transfers';
 import { describeApiError } from '../api/errors';
 import { logApiError } from '../api/logging';
 import { useSocket } from '../context/SocketContext';
@@ -64,7 +63,7 @@ function formatLastInbound(dateStr: string | null): string | null {
   return `${absolute} (${relative})`;
 }
 
-export default function ChatScreen({ route, navigation }: Props) {
+export default function ChatScreen({ route }: Props) {
   const { contact } = route.params;
   const { subscribe, setActiveContact } = useSocket();
   const headerHeight = useHeaderHeight();
@@ -84,13 +83,22 @@ export default function ChatScreen({ route, navigation }: Props) {
   // whether a stuck banner is a stale flag (recent last_inbound_at, window
   // still marked closed) or the window is genuinely >24h old.
   const [lastInboundAt, setLastInboundAt] = useState(contact.last_inbound_at ?? null);
-  // The transfer this contact is tied to, if any — drives the "Mark
-  // Resolved" header button. null both while unresolved-and-loading and
-  // for the legitimate case of no matching transfer (e.g. assigned some
-  // other way) — the button just doesn't appear in either case, which is
-  // the right failure mode for a non-essential action like this.
+  // Whether this contact currently has a live, unresolved transfer —
+  // drives the "chatbot may also respond" caution below, not an action.
+  // Resolving/reassigning a transfer is a manager decision made from
+  // Queue, not something exposed here: this app previously had a
+  // "Mark Resolved" button right in the chat, but that button's own
+  // premise didn't hold up — tapping it resumes the transfer (handing the
+  // conversation back to the chatbot), yet doesn't clear the contact's
+  // own assigned_user_id, so the chat kept sitting in "My Chats" anyway.
+  // An agent tapping what looks like "close this out" while actually
+  // reactivating the bot, with no visible change to show for it, is a
+  // worse failure mode than not offering the action at all.
   const [activeTransfer, setActiveTransfer] = useState<AgentTransfer | null>(null);
-  const [resolvingTransfer, setResolvingTransfer] = useState(false);
+  // Distinguishes "haven't checked yet" from "checked, genuinely none" —
+  // without this, the caution banner below would flash on for every chat
+  // for the split second before the check resolves.
+  const [transferChecked, setTransferChecked] = useState(false);
   const listRef = useRef<SectionList<WhatomateMessage, DateSection>>(null);
   // Sends fail (or succeed) asynchronously on the server — the WebSocket
   // status_update correction can arrive before the optimistic "add this
@@ -204,14 +212,17 @@ export default function ChatScreen({ route, navigation }: Props) {
     return fromMessages > fromServer ? lastIncomingMessage.created_at : lastInboundAt;
   }, [lastIncomingMessage, lastInboundAt]);
 
-  // Look up whether this contact has a matching active transfer, to know
-  // whether to offer "Mark Resolved" at all — fails silently (no error
-  // shown) since this is a nice-to-have, not core chat functionality, and
-  // a legitimate "no team configured" or "not found" result looks the
-  // same to the person using the app either way (button just isn't there).
+  // Look up whether this contact has a matching active transfer, to
+  // decide whether the "chatbot may also respond" caution below applies —
+  // fails silently (no error shown) since this is advisory, not core chat
+  // functionality, and a legitimate "no team configured" or "not found"
+  // result looks the same to the person using the app either way (no
+  // caution shown in either case, which is the safer failure mode: it
+  // stays quiet rather than risk a false alarm from an unrelated error).
   useFocusEffect(
     useCallback(() => {
       let isActive = true;
+      setTransferChecked(false);
       (async () => {
         try {
           const teamId = await resolveTeamIdByName(getTeamName());
@@ -224,6 +235,8 @@ export default function ChatScreen({ route, navigation }: Props) {
         } catch (err) {
           logApiError('Failed to look up active transfer:', err);
           if (isActive) setActiveTransfer(null);
+        } finally {
+          if (isActive) setTransferChecked(true);
         }
       })();
       return () => {
@@ -371,60 +384,6 @@ export default function ChatScreen({ route, navigation }: Props) {
     };
   }, [contact.id, subscribe, applyPendingStatus]);
 
-  const doResolveTransfer = useCallback(async () => {
-    if (!activeTransfer) return;
-    setResolvingTransfer(true);
-    try {
-      await resumeTransfer(activeTransfer.id);
-      setActiveTransfer(null);
-      Alert.alert('Marked as resolved', 'This conversation has been closed out of the queue.');
-    } catch (err) {
-      logApiError('Failed to mark transfer resolved:', err);
-      Alert.alert('Could not mark resolved', describeApiError(err));
-    } finally {
-      setResolvingTransfer(false);
-    }
-  }, [activeTransfer]);
-
-  const handleMarkResolved = useCallback(() => {
-    Alert.alert(
-      'Mark as resolved?',
-      'This closes the conversation out of the team queue.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Mark Resolved', onPress: doResolveTransfer },
-      ]
-    );
-  }, [doResolveTransfer]);
-
-  // Agent-initiated resolution, from the chat itself — the primary place
-  // for this action, since the agent handling the conversation is the
-  // one who actually knows it's done (Queue's own Mark Resolved button
-  // stays too, for manager oversight/cleanup, but isn't the main path).
-  useEffect(() => {
-    navigation.setOptions({
-      headerRight: activeTransfer
-        ? () => (
-            <TouchableOpacity
-              onPress={handleMarkResolved}
-              disabled={resolvingTransfer}
-              hitSlop={8}
-            >
-              {resolvingTransfer ? (
-                <ActivityIndicator size="small" color={colors.brandGreenDark} />
-              ) : (
-                <Ionicons
-                  name="checkmark-done-circle-outline"
-                  size={26}
-                  color={colors.brandGreenDark}
-                />
-              )}
-            </TouchableOpacity>
-          )
-        : undefined,
-    });
-  }, [activeTransfer, resolvingTransfer, navigation, handleMarkResolved]);
-
   const handleSend = async () => {
     const text = draft.trim();
     if (!text || sending) return;
@@ -470,6 +429,15 @@ export default function ChatScreen({ route, navigation }: Props) {
       keyboardVerticalOffset={headerHeight}
     >
       {errorMessage ? <Text style={styles.error}>{errorMessage}</Text> : null}
+
+      {transferChecked && !activeTransfer ? (
+        <View style={styles.transferCautionBanner}>
+          <Ionicons name="information-circle-outline" size={16} color={colors.textSecondary} />
+          <Text style={styles.transferCautionText}>
+            No active handoff found for this conversation — the chatbot may also respond.
+          </Text>
+        </View>
+      ) : null}
 
       <SectionList
         ref={listRef}
@@ -592,6 +560,24 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   sendButtonDisabled: { opacity: 0.4 },
+  // Deliberately quieter than windowClosedBanner below — this is a soft
+  // caution (it also fires for contacts that were always assigned some
+  // other way and never had a transfer at all), not an alarm, so it
+  // shouldn't compete visually with a banner that actually blocks an
+  // action.
+  transferCautionBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+    paddingHorizontal: spacing.md,
+    backgroundColor: colors.chipBackground,
+  },
+  transferCautionText: {
+    flex: 1,
+    marginLeft: spacing.sm,
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
   windowClosedBanner: {
     flexDirection: 'row',
     alignItems: 'flex-start',
