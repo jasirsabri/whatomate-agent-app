@@ -19,6 +19,9 @@ import type { RootStackParamList, MainTabParamList } from '../navigation/types';
 import { listContacts } from '../api/contacts';
 import { describeApiError } from '../api/errors';
 import { logApiError } from '../api/logging';
+import { resolveTeamIdByName } from '../api/teams';
+import { listTeamQueue } from '../api/transfers';
+import { getTeamName } from '../config';
 import { useSocket } from '../context/SocketContext';
 import { formatListTimestamp } from '../utils/formatTimestamp';
 import { colors, radii, spacing } from '../theme';
@@ -57,7 +60,40 @@ export default function ConversationListScreen({ navigation }: Props) {
     try {
       setErrorMessage(null);
       const result = await listContacts(1);
-      const sorted = [...result.contacts].sort((a, b) => {
+      let visible = result.contacts;
+
+      // contact.assigned_user_id (what the list above is actually scoped
+      // by, server-side) isn't guaranteed to clear the instant a transfer
+      // resumes or expires — Whatomate's various derived/status fields
+      // have repeatedly turned out to lag behind the real state this
+      // session (service_window_open, last_inbound_at). Left unchecked,
+      // that leaves a chat the chatbot has already resumed control of
+      // still sitting in this agent's list, racing with the bot on
+      // whatever the customer sends next. GET /api/chatbot/transfers is
+      // the actual live status (status: 'active'|'resumed'|'expired') and
+      // is already proven to work for a regular, non-manager agent (see
+      // findActiveTransferForContact) — so narrow down to just the
+      // contacts with a currently-active transfer assigned to this agent.
+      // Best-effort: if team resolution or the transfers fetch fails,
+      // falls back to the unfiltered list above rather than showing
+      // nothing — this narrows what the tag-scoped list already returned,
+      // it isn't the only thing standing between the agent and their chats.
+      try {
+        const teamId = await resolveTeamIdByName(getTeamName());
+        if (teamId && myUserId) {
+          const activeTransfers = await listTeamQueue(teamId);
+          const myActiveContactIds = new Set(
+            activeTransfers
+              .filter((t) => t.status === 'active' && t.agent_id === myUserId)
+              .map((t) => t.contact_id)
+          );
+          visible = visible.filter((c) => myActiveContactIds.has(c.id));
+        }
+      } catch (err) {
+        logApiError('Failed to narrow conversations to active transfers:', err);
+      }
+
+      const sorted = [...visible].sort((a, b) => {
         const aTime = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
         const bTime = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
         return bTime - aTime;
@@ -67,7 +103,7 @@ export default function ConversationListScreen({ navigation }: Props) {
       logApiError('Failed to load conversations:', err);
       setErrorMessage(describeApiError(err));
     }
-  }, []);
+  }, [myUserId]);
 
   // Live updates: refresh when a message assigned to us arrives, or when a
   // contact record changes (reassignment, tags, etc). new_message is
