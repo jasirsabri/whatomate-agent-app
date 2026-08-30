@@ -31,10 +31,22 @@ import type { NewMessagePayload, StatusUpdatePayload } from '../ws/types';
 import type { AgentTransfer } from '../api/transfers';
 import type { WhatomateMessage } from '../types';
 
+/** A synthetic row spliced into a section's data alongside real messages
+ * — distinguished from WhatomateMessage by the isUnreadDivider tag rather
+ * than a wrapper, so keyExtractor/etc. keep working on both uniformly
+ * (both have a stable `id`). */
+interface UnreadDividerRow {
+  id: 'unread-divider';
+  isUnreadDivider: true;
+  count: number;
+}
+
+type ChatRow = WhatomateMessage | UnreadDividerRow;
+
 interface DateSection {
   key: string;
   title: string;
-  data: WhatomateMessage[];
+  data: ChatRow[];
 }
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Chat'>;
@@ -99,7 +111,7 @@ export default function ChatScreen({ route }: Props) {
   // without this, the caution banner below would flash on for every chat
   // for the split second before the check resolves.
   const [transferChecked, setTransferChecked] = useState(false);
-  const listRef = useRef<SectionList<WhatomateMessage, DateSection>>(null);
+  const listRef = useRef<SectionList<ChatRow, DateSection>>(null);
   // Sends fail (or succeed) asynchronously on the server — the WebSocket
   // status_update correction can arrive before the optimistic "add this
   // message to the list" step finishes, since they're two independent
@@ -109,6 +121,13 @@ export default function ChatScreen({ route }: Props) {
   // stuck showing a stale "sent" checkmark even after they'd genuinely
   // failed — e.g. the 24-hour-window case).
   const pendingStatusUpdatesRef = useRef<Map<string, StatusUpdatePayload>>(new Map());
+  // Frozen at mount from the nav param's snapshot (from whenever the list
+  // was last fetched, before opening this chat marked anything read) —
+  // deliberately never updated afterward. Once you're actively viewing
+  // the chat, "unread" stops meaning anything for where the divider
+  // should sit; it should stay put where it first appeared, not slide
+  // around as new messages arrive.
+  const initialUnreadCountRef = useRef(contact.unread_count);
 
   const applyPendingStatus = useCallback((message: WhatomateMessage): WhatomateMessage => {
     const pending = pendingStatusUpdatesRef.current.get(message.id);
@@ -254,23 +273,53 @@ export default function ChatScreen({ route }: Props) {
     }, [contact.id, setActiveContact])
   );
 
+  // Where the "N unread messages" divider goes — counting back from the
+  // newest message through the last `initialUnreadCountRef.current`
+  // *incoming* ones, matching WhatsApp's own read-cursor convention
+  // rather than needing any per-message read flag from the server (the
+  // API only exposes an aggregate unread_count, not which specific
+  // messages it covers). null if there's nothing unread, or if fewer
+  // incoming messages are loaded than the count claims (can't place it
+  // accurately, so it's better to show nothing than guess wrong).
+  const unreadDividerBeforeId = useMemo(() => {
+    const count = initialUnreadCountRef.current;
+    if (!count || count <= 0) return null;
+    let remaining = count;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].direction === 'incoming') {
+        remaining -= 1;
+        if (remaining === 0) return messages[i].id;
+      }
+    }
+    return null;
+  }, [messages]);
+
   // Grouped into WhatsApp-style date sections — messages arrive already
   // sorted ascending by created_at (see fetchMessages/the live-append
   // above), so a single consecutive pass is enough; no need to re-sort
-  // within groups.
+  // within groups. The unread divider is spliced in as its own row right
+  // before the message it belongs before, within whichever date section
+  // that message ends up in.
   const sections = useMemo((): DateSection[] => {
     const groups: DateSection[] = [];
     for (const message of messages) {
       const key = dateSectionKey(message.created_at);
-      const current = groups[groups.length - 1];
-      if (current && current.key === key) {
-        current.data.push(message);
-      } else {
-        groups.push({ key, title: formatDateSeparator(message.created_at), data: [message] });
+      let current = groups[groups.length - 1];
+      if (!current || current.key !== key) {
+        current = { key, title: formatDateSeparator(message.created_at), data: [] };
+        groups.push(current);
       }
+      if (message.id === unreadDividerBeforeId) {
+        current.data.push({
+          id: 'unread-divider',
+          isUnreadDivider: true,
+          count: initialUnreadCountRef.current,
+        });
+      }
+      current.data.push(message);
     }
     return groups;
-  }, [messages]);
+  }, [messages, unreadDividerBeforeId]);
 
   // SectionList has no scrollToEnd (unlike FlatList — its items span
   // sections, so RN only gives it scrollToLocation by section+item index).
@@ -290,6 +339,32 @@ export default function ChatScreen({ route }: Props) {
     },
     [sections]
   );
+
+  // On first open, land on the unread divider (viewPosition: 0 pins it to
+  // the top of the viewport, revealing it rather than scrolling past it)
+  // instead of jumping straight past unread messages to the very latest —
+  // matches WhatsApp's own "pick up where you left off" behavior. Falls
+  // back to the bottom when there's no divider to show.
+  const scrollToInitialPosition = useCallback(
+    (animated: boolean) => {
+      for (let s = 0; s < sections.length; s++) {
+        const itemIndex = sections[s].data.findIndex((row) => 'isUnreadDivider' in row);
+        if (itemIndex !== -1) {
+          listRef.current?.scrollToLocation({
+            sectionIndex: s,
+            itemIndex,
+            viewPosition: 0,
+            animated,
+          });
+          return;
+        }
+      }
+      scrollToBottom(animated);
+    },
+    [sections, scrollToBottom]
+  );
+  const initialScrollDoneRef = useRef(false);
+
   // Without getItemLayout (impractical here — bubble height varies with
   // message length), scrollToLocation targeting a row outside the
   // currently-measured window doesn't just warn, it throws — RN's
@@ -425,7 +500,20 @@ export default function ChatScreen({ route }: Props) {
     }
   };
 
-  const renderItem = ({ item }: { item: WhatomateMessage }) => <MessageBubble message={item} />;
+  const renderItem = ({ item }: { item: ChatRow }) => {
+    if ('isUnreadDivider' in item) {
+      return (
+        <View style={styles.unreadDividerRow}>
+          <View style={styles.unreadDividerPill}>
+            <Text style={styles.unreadDividerText}>
+              {item.count} unread message{item.count === 1 ? '' : 's'}
+            </Text>
+          </View>
+        </View>
+      );
+    }
+    return <MessageBubble message={item} />;
+  };
 
   const renderSectionHeader = ({ section }: { section: DateSection }) => (
     <View style={styles.dateSeparatorRow}>
@@ -468,7 +556,14 @@ export default function ChatScreen({ route }: Props) {
         renderSectionHeader={renderSectionHeader}
         stickySectionHeadersEnabled
         contentContainerStyle={styles.listContent}
-        onContentSizeChange={() => scrollToBottom(false)}
+        onContentSizeChange={() => {
+          if (!initialScrollDoneRef.current) {
+            initialScrollDoneRef.current = true;
+            scrollToInitialPosition(false);
+          } else {
+            scrollToBottom(false);
+          }
+        }}
         onScrollToIndexFailed={handleScrollToIndexFailed}
       />
 
@@ -545,6 +640,30 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     color: colors.textSecondary,
+  },
+  // Same shape/shadow as the date pill, but a green tint distinguishes it
+  // from a date separator at a glance — not "stuck" like the date
+  // header, since it's a one-time marker for where you left off, not a
+  // recurring section boundary you'd want pinned while scrolling past it.
+  unreadDividerRow: {
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+  },
+  unreadDividerPill: {
+    backgroundColor: colors.statusInProgressBg,
+    borderRadius: radii.chip,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 1,
+    elevation: 1,
+  },
+  unreadDividerText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.brandGreenDark,
   },
   error: {
     color: colors.error,
