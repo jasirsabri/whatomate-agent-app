@@ -181,6 +181,29 @@ export default function QueueScreen({ navigation }: Props) {
     return result;
   }, [transfers]);
 
+  // Tab badge for anything that needs a manager's action — Waiting (no
+  // agent yet) and Needs Attention (breached/escalated, regardless of
+  // assignment). In Progress items don't need a new decision, so they
+  // don't count. This is the gap this screen previously had relative to
+  // the Chats tab: with manual assignment strategy, a new queue item sits
+  // silently until someone happens to open this tab — no in-app signal
+  // at all unless the app is backgrounded/closed (push-bridge notifies
+  // managers only in that case). A badge means noticing it doesn't
+  // depend on which screen happens to be open right now.
+  const pendingCount = useMemo(
+    () =>
+      sections
+        .filter((s) => s.key !== 'inProgress')
+        .reduce((sum, s) => sum + s.data.length, 0),
+    [sections]
+  );
+  useEffect(() => {
+    navigation.setOptions({
+      tabBarBadge: pendingCount > 0 ? pendingCount : undefined,
+      tabBarBadgeStyle: { backgroundColor: colors.brandGreen },
+    });
+  }, [pendingCount, navigation]);
+
   const renderSectionHeader = ({ section }: { section: Section }) => {
     const dotColor =
       section.key === 'attention'

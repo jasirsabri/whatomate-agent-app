@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -15,6 +15,7 @@ import { listTeamMembers } from '../api/teams';
 import { assignTransfer } from '../api/transfers';
 import { describeApiError } from '../api/errors';
 import { logApiError } from '../api/logging';
+import { useSocket } from '../context/SocketContext';
 import { colors, spacing } from '../theme';
 import type { TeamMember } from '../api/teams';
 
@@ -22,10 +23,41 @@ type Props = NativeStackScreenProps<RootStackParamList, 'AssignAgent'>;
 
 export default function AssignAgentScreen({ route, navigation }: Props) {
   const { transfer } = route.params;
+  const { subscribe } = useSocket();
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [assigningId, setAssigningId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Whatomate's AssignAgentTransfer handler has no guard against two
+  // managers assigning the same transfer at once beyond checking
+  // status=="active" — it never checks whether agent_id is already set
+  // before overwriting it, so a second, near-simultaneous assign silently
+  // wins with no conflict error. Can't fix that server-side (third-party
+  // product), so this is a client-side mitigation: listen for the same
+  // live events Queue already reacts to, and if this exact transfer gets
+  // assigned or resumed by anyone while this screen is open, stop letting
+  // it be picked further rather than let someone submit into a race
+  // they can't see.
+  const [staleReason, setStaleReason] = useState<string | null>(null);
+
+  useEffect(() => {
+    const unsubAssigned = subscribe('agent_transfer_assign', (payload) => {
+      const p = payload as { id?: string };
+      if (p.id === transfer.id) {
+        setStaleReason('Someone else just assigned this conversation.');
+      }
+    });
+    const unsubResumed = subscribe('agent_transfer_resume', (payload) => {
+      const p = payload as { id?: string };
+      if (p.id === transfer.id) {
+        setStaleReason('This conversation was just resumed — it’s no longer waiting for an agent.');
+      }
+    });
+    return () => {
+      unsubAssigned();
+      unsubResumed();
+    };
+  }, [subscribe, transfer.id]);
 
   const fetchMembers = useCallback(async () => {
     try {
@@ -60,6 +92,7 @@ export default function AssignAgentScreen({ route, navigation }: Props) {
   );
 
   const handleAssign = async (member: TeamMember) => {
+    if (staleReason) return;
     setAssigningId(member.user_id);
     setErrorMessage(null);
     try {
@@ -114,7 +147,15 @@ export default function AssignAgentScreen({ route, navigation }: Props) {
 
       {errorMessage ? <Text style={styles.error}>{errorMessage}</Text> : null}
 
-      {loading ? (
+      {staleReason ? (
+        <View style={styles.staleContainer}>
+          <Ionicons name="information-circle-outline" size={32} color={colors.textSecondary} />
+          <Text style={styles.staleText}>{staleReason}</Text>
+          <TouchableOpacity style={styles.staleButton} onPress={() => navigation.goBack()}>
+            <Text style={styles.staleButtonText}>Go Back</Text>
+          </TouchableOpacity>
+        </View>
+      ) : loading ? (
         <ActivityIndicator style={styles.loadingIndicator} size="large" />
       ) : (
         <FlatList
@@ -134,6 +175,26 @@ export default function AssignAgentScreen({ route, navigation }: Props) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.screenBackground },
+  staleContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.xl,
+  },
+  staleText: {
+    fontSize: 15,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginTop: spacing.md,
+    marginBottom: spacing.lg,
+  },
+  staleButton: {
+    backgroundColor: colors.brandGreenDark,
+    borderRadius: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+  },
+  staleButtonText: { color: '#fff', fontSize: 15, fontWeight: '600' },
   contactBanner: {
     backgroundColor: colors.chipBackground,
     paddingHorizontal: spacing.lg,
