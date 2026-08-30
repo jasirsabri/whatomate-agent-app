@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -19,6 +19,7 @@ import { listTeamQueue, resumeTransfer } from '../api/transfers';
 import { resolveTeamIdByName } from '../api/teams';
 import { describeApiError } from '../api/errors';
 import { logApiError } from '../api/logging';
+import { useSocket } from '../context/SocketContext';
 import { getTeamName } from '../config';
 import { colors, spacing } from '../theme';
 import type { AgentTransfer } from '../api/transfers';
@@ -59,6 +60,7 @@ function attentionReasons(item: AgentTransfer): string[] {
 }
 
 export default function QueueScreen({ navigation }: Props) {
+  const { subscribe } = useSocket();
   const [transfers, setTransfers] = useState<AgentTransfer[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -99,6 +101,22 @@ export default function QueueScreen({ navigation }: Props) {
       };
     }, [fetchQueue])
   );
+
+  // Live updates — this screen previously only refreshed on focus/pull,
+  // per the "Queue has no live updates yet" limitation. Event names
+  // verified directly against Whatomate's source
+  // (internal/handlers/agent_transfers.go's broadcast* functions), same
+  // as ConversationListScreen's identical subscription.
+  useEffect(() => {
+    const unsubCreated = subscribe('agent_transfer', () => fetchQueue());
+    const unsubAssigned = subscribe('agent_transfer_assign', () => fetchQueue());
+    const unsubResumed = subscribe('agent_transfer_resume', () => fetchQueue());
+    return () => {
+      unsubCreated();
+      unsubAssigned();
+      unsubResumed();
+    };
+  }, [subscribe, fetchQueue]);
 
   const handleRefresh = async () => {
     setRefreshing(true);

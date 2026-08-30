@@ -130,8 +130,8 @@ details, not settings.
   can still send a free-form reply, per WhatsApp's real 24-hour customer
   service window) and **Historic** (window closed, would need a template
   to re-engage). Pull-to-refresh, search, live-updates on relevant
-  `new_message`/`contact_update` events, refetch on screen focus as a
-  fallback
+  `new_message`/`contact_update`/`agent_transfer`/`agent_transfer_assign`/
+  `agent_transfer_resume` events, refetch on screen focus as a fallback
 - **Chat thread** — `GET/POST /api/contacts/{id}/messages`, live-updates
   via the socket instead of polling, `set_contact` sent while a thread is
   open. Re-scrolls to the latest message when the keyboard opens — it
@@ -269,11 +269,16 @@ details, not settings.
   bigger, separate project, not something this app alone can do (Expo Go
   apps don't run reliably in the background). Parked for now; manual
   toggle on the Profile tab is what exists today.
-- **Queue has no live updates yet** — unlike the conversation list and
-  chat thread, the Queue screen only refreshes on pull-to-refresh and
-  screen focus, not via the WebSocket. Whatomate does broadcast
-  transfer-created/assigned events, but wiring those up was deliberately
-  left for a fast-follow rather than blocking this round on it.
+- ~~Queue has no live updates yet~~ — fixed. Both Queue and the
+  conversation list now subscribe to `agent_transfer`,
+  `agent_transfer_assign`, and `agent_transfer_resume` — the real event
+  names, verified directly against Whatomate's source
+  (`internal/handlers/agent_transfers.go`'s `broadcastTransfer*`
+  functions) rather than guessed. None of their payloads carry enough to
+  cheaply filter "is this relevant to me" (e.g. the resume event has no
+  `agent_id` at all), so both just refetch unconditionally on any of the
+  three, the same way `contact_update` already did — this only changes
+  how promptly each list refreshes, not what it shows.
 - **Sessions last ~10 hours, not indefinitely** — no working token
   refresh (see "Auth" above for why). A full day's use only needs one
   morning login; if it does expire mid-use, you're signed out with a

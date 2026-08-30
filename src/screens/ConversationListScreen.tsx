@@ -69,10 +69,22 @@ export default function ConversationListScreen({ navigation }: Props) {
     }
   }, []);
 
-  // Live updates: refresh when a message assigned to us arrives, or when a
-  // contact record changes (reassignment, tags, etc). new_message is
-  // broadcast org-wide by the server, so we filter by assigned_user_id
-  // ourselves — Whatomate doesn't scope this event server-side.
+  // Live updates: refresh when a message assigned to us arrives, a
+  // contact record changes (reassignment, tags, etc), or a transfer is
+  // created/assigned/resumed — verified directly against Whatomate's own
+  // source (internal/handlers/agent_transfers.go's broadcast* functions)
+  // rather than guessed: the real event names are exactly agent_transfer,
+  // agent_transfer_assign, and agent_transfer_resume. None of their
+  // payloads carry enough to cheaply tell "is this relevant to me" (e.g.
+  // agent_transfer_resume has no agent_id at all), so — same as
+  // contact_update below — this just refetches unconditionally rather
+  // than risk a wrong client-side filter (see git history from earlier
+  // today for exactly how that goes wrong). This only changes how
+  // promptly the list refreshes; what it shows still comes entirely from
+  // GET /api/contacts, whose own server-side scoping is already correct.
+  // new_message is broadcast org-wide by the server, so we filter by
+  // assigned_user_id ourselves — Whatomate doesn't scope this event
+  // server-side.
   useEffect(() => {
     const unsubNewMessage = subscribe('new_message', (payload) => {
       const msg = payload as NewMessagePayload;
@@ -83,9 +95,21 @@ export default function ConversationListScreen({ navigation }: Props) {
     const unsubContactUpdate = subscribe('contact_update', () => {
       fetchContacts();
     });
+    const unsubTransferCreated = subscribe('agent_transfer', () => {
+      fetchContacts();
+    });
+    const unsubTransferAssigned = subscribe('agent_transfer_assign', () => {
+      fetchContacts();
+    });
+    const unsubTransferResumed = subscribe('agent_transfer_resume', () => {
+      fetchContacts();
+    });
     return () => {
       unsubNewMessage();
       unsubContactUpdate();
+      unsubTransferCreated();
+      unsubTransferAssigned();
+      unsubTransferResumed();
     };
   }, [subscribe, myUserId, fetchContacts]);
 
