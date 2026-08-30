@@ -181,8 +181,9 @@ export default function ProfileScreen() {
             <Text style={styles.availabilityLabel}>Notification Sound</Text>
             <Text style={styles.availabilityHint}>
               Play a sound for new messages assigned to you while the app is
-              open. Doesn't cover messages while the app is closed — that's
-              a separate feature, still being built.
+              open. Messages while the app is closed or backgrounded are
+              covered separately by push notifications, which need a push
+              bridge server configured in Settings to work.
             </Text>
           </View>
           {updatingSound ? (
