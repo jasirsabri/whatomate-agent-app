@@ -38,6 +38,14 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
   const backoffRef = useRef(INITIAL_BACKOFF_MS);
   const activeRef = useRef(false); // whether we *should* be connected right now
   const activeContactRef = useRef<string | null>(null);
+  // Verified against source: the server's actual liveness tracking is a
+  // native WS control-frame ping/pong invisible to JS, entirely separate
+  // from this JSON {type:'ping'}/{type:'pong'} exchange — this app-level
+  // ping was previously fire-and-forget, never checking whether the
+  // matching pong actually came back. The server DOES answer it for
+  // real, though (its own protocol handler replies with a JSON pong), so
+  // it's a genuine liveness signal once something actually watches it.
+  const awaitingPongRef = useRef(false);
 
   function clearTimers() {
     if (reconnectTimerRef.current) {
@@ -108,6 +116,7 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
       // drop. So it's safe to treat this as connected right away.
       setIsConnected(true);
       backoffRef.current = INITIAL_BACKOFF_MS;
+      awaitingPongRef.current = false;
 
       getExpoPushToken().then((pushToken) => {
         if (pushToken) sendPushHeartbeat(pushToken);
@@ -124,6 +133,18 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
 
       pingTimerRef.current = setInterval(() => {
         if (socket.readyState === WebSocket.OPEN) {
+          if (awaitingPongRef.current) {
+            // Missed the previous pong entirely — this JSON exchange is
+            // the only liveness signal available at this layer (native
+            // WS ping/pong happens beneath the JS WebSocket API,
+            // handled — or not — by the platform, invisibly). Treat one
+            // miss as a dead/zombied connection rather than trusting it
+            // indefinitely; onclose below drives the existing reconnect.
+            console.error('[socket] missed pong, forcing reconnect');
+            socket.close();
+            return;
+          }
+          awaitingPongRef.current = true;
           socket.send(JSON.stringify({ type: 'ping' }));
         }
         // Tells the bridge service this device is actively connected —
@@ -142,7 +163,10 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     socket.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data) as WsEnvelope;
-        if (msg.type === 'pong') return;
+        if (msg.type === 'pong') {
+          awaitingPongRef.current = false;
+          return;
+        }
 
         if (msg.type === 'new_message') {
           const payload = msg.payload as NewMessagePayload;

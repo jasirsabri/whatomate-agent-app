@@ -110,7 +110,11 @@ export default function TransferDetailScreen({ route, navigation }: Props) {
 
     const unsubStatusUpdate = subscribe('status_update', (payload) => {
       const update = payload as StatusUpdatePayload;
-      if (update.contact_id !== transfer.contact_id) return;
+      // contact_id is absent on the (far more common) async delivery/read
+      // webhook path — see the comment on StatusUpdatePayload. Only skip
+      // when it's present and clearly a different contact; a mismatch by
+      // message_id alone is already a safe no-op via .map() below.
+      if (update.contact_id && update.contact_id !== transfer.contact_id) return;
       setMessages((prev) =>
         prev.map((m) =>
           m.id === update.message_id

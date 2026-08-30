@@ -57,8 +57,23 @@ export async function resolveTeamIdByName(teamName: string): Promise<string | nu
     return cachedResolution.id;
   }
   const teams = await listTeams();
-  const match = teams.find((t) => t.name.trim().toLowerCase() === teamName.trim().toLowerCase());
-  const id = match?.id ?? null;
+  const matches = teams.filter(
+    (t) => t.name.trim().toLowerCase() === teamName.trim().toLowerCase()
+  );
+  // Team names aren't guaranteed unique server-side — no constraint, no
+  // duplicate check on creation. Picking the first match blindly would
+  // silently scope Queue/assignment to whichever one happened to sort
+  // first, with no error shown. Treat an ambiguous name as unresolved
+  // (same as "not found" to callers) rather than guess wrong.
+  if (matches.length > 1) {
+    console.error(
+      `[teams] "${teamName}" matches ${matches.length} teams — ambiguous, refusing to guess`,
+      matches.map((t) => t.id)
+    );
+    cachedResolution = { name: teamName, id: null };
+    return null;
+  }
+  const id = matches[0]?.id ?? null;
   cachedResolution = { name: teamName, id };
   return id;
 }

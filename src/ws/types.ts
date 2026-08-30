@@ -32,9 +32,16 @@ export interface NewMessagePayload {
 
 // Also broadcast org-wide. No assigned_user_id here — filter by whether
 // message_id/contact_id matches something the screen currently has loaded.
+// contact_id is genuinely optional, not just omitempty-when-unset: it's
+// only present on the synchronous send-result broadcast
+// (finalizeMessageSend in messages.go), and absent on the far more common
+// async delivery/read webhook path (updateMessageStatus in webhook.go),
+// which carries only message_id/status/error_message. A consumer that
+// requires contact_id before doing anything will silently miss nearly
+// every delivered/read tick.
 export interface StatusUpdatePayload {
   message_id: string;
-  contact_id: string;
+  contact_id?: string;
   status: string;
   wamid?: string;
   error_message?: string;

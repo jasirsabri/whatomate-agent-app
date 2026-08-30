@@ -360,13 +360,34 @@ export default function ChatScreen({ route }: Props) {
 
     const unsubStatusUpdate = subscribe('status_update', (payload) => {
       const update = payload as StatusUpdatePayload;
-      if (update.contact_id !== contact.id) return;
+      // contact_id is only present on the synchronous send-result path
+      // (an agent's own send attempt succeeding/failing immediately) —
+      // verified against source: the async delivery/read webhook path
+      // (which is where nearly every delivered/read tick and some
+      // failures actually come from) never includes it at all. Early-
+      // returning on a strict mismatch meant almost every real status
+      // update was silently dropped, since undefined !== contact.id is
+      // always true — ticks only ever caught up on the next refetch,
+      // never live. When contact_id IS present, still use it to skip
+      // other contacts' events outright; when it's absent, fall through
+      // and match by message_id alone.
+      if (update.contact_id && update.contact_id !== contact.id) return;
+
       setMessages((prev) => {
         const exists = prev.some((m) => m.id === update.message_id);
         if (!exists) {
           // Arrived before the message it's about was added — remember
           // it and apply the moment that message does appear, rather
           // than silently losing the correction (see the ref's comment).
+          // Capped: BroadcastToOrg means every other contact's status
+          // updates land here too now that contact_id can't gate them
+          // out up front, and most will never match anything in this
+          // screen's own messages — bound the map so an org-wide flood
+          // can't grow it for this screen's entire lifetime.
+          if (pendingStatusUpdatesRef.current.size >= 50) {
+            const oldestKey = pendingStatusUpdatesRef.current.keys().next().value;
+            if (oldestKey !== undefined) pendingStatusUpdatesRef.current.delete(oldestKey);
+          }
           pendingStatusUpdatesRef.current.set(update.message_id, update);
           return prev;
         }
