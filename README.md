@@ -335,6 +335,71 @@ details, not settings.
   from a chat-opening tap, and `src/navigation/types.ts` types `Main`'s
   params to accept a nested `{ screen: 'QueueTab' }` target for it.
 
+## Compatibility & self-hosting
+
+This app isn't tied to Consyst's own Whatomate instance — server URL,
+contact tag, team name, and the push bridge URL all ship blank and are
+set once from the Settings screen (pre-login), specifically so the same
+Play Store build works against anyone's self-hosted Whatomate. A couple
+of things are worth knowing if you're pointing it at your own instance:
+
+**No pinned Whatomate version.** Several behaviors here were verified
+directly against Whatomate's own Go source rather than its REST API docs,
+because the docs didn't match the server version this was built against
+in a few places (envelope key names, field names, request body shapes).
+There's no clean version string exposed anywhere to pin this to — the
+public endpoints (`/health`, etc.) don't return one — so instead, here's
+what was actually verified, as a concrete way to check your own
+deployment's compatibility rather than chasing a version number:
+- Response envelope shape is always `{status, data, message?}`, with
+  `data`'s key matching the resource name (`"contacts"`, not `"items"`) on
+  list endpoints — see `src/types/index.ts`.
+- Login/refresh responses set three cookies (`whm_access`, `whm_refresh`,
+  `whm_csrf`) via `Set-Cookie`, readable by React Native's networking
+  layer even though they're httpOnly — see `src/api/cookies.ts`. This is
+  what lets the app extract a real bearer token instead of relying on
+  cookie-based auth for every request.
+- Sending an `Authorization` header on every request is what exempts a
+  request from Whatomate's CSRF check (`internal/middleware/csrf.go`) —
+  this is why the app never needs to handle CSRF tokens itself.
+- `service_window_open` is computed from `last_inbound_at` being within
+  24h — but see the note in `ChatScreen.tsx` about this lagging behind
+  reality in practice; the app already works around it by cross-checking
+  against the actual message list rather than trusting that field alone.
+- Contacts are scoped to "assigned to me" server-side
+  (`scopeAssignedContact`) — an unassigned contact simply won't appear,
+  not even as a 403.
+- `is_available: false` has a real server-side side effect
+  (`UpdateAvailability`): it returns currently-assigned conversations to
+  the team queue, not just a flag flip.
+- Permission checks mirror Whatomate's own `HasPermission()` — a
+  super-admin account bypasses the explicit permission list entirely.
+
+If your instance behaves differently in any of these, the likely fix is
+adjusting the relevant `api/*.ts` file rather than assuming something
+else is broken.
+
+**Push notifications don't need your own Firebase project.** The app
+registers an *Expo* push token (`getExpoPushTokenAsync`, tied to this
+project's EAS project ID — not a raw FCM token), and
+[whatomate-push-bridge](https://github.com/jasirsabri/whatomate-push-bridge)
+delivers by calling Expo's own push relay (`exp.host/--/api/v2/push/send`)
+with that token — Expo's infrastructure is what actually talks to
+Firebase, using credentials already registered against this app's EAS
+project. Self-hosting your own push-bridge instance, pointed at your own
+Whatomate and with the app's "Push Notification Server" setting pointed
+at it, is enough — no Firebase project of your own required. (Expo's push
+API doesn't require proof of ownership of a token to send to it by
+default, worth knowing from a security standpoint — see that project's
+own README for its "Enhanced Security" option.)
+
+**Running the push bridge on the same server as Whatomate itself is
+fine.** It talks to Whatomate over the same public URL any other client
+would use (not container-to-container networking), so it's exactly as
+decoupled whether it's on the same host or a different one — just give
+it its own subdomain/port and a separate `docker-compose.yml`, same as
+this project's own deployment does.
+
 ## Setup
 
 You'll need [Expo Go](https://expo.dev/go) installed on your phone — for
@@ -359,7 +424,10 @@ Server URL, contact tag, team name, and the push notification server URL
 are all editable from Settings (pre-login) rather than hardcoded — see
 `src/config.ts` for the defaults and persistence logic (`getServerUrl()`,
 `getContactTag()`, `getTeamName()`, `getPushBridgeUrl()`, each backed by
-secure on-device storage).
+secure on-device storage). Server URL and push bridge URL ship blank —
+there's no one org's address that would be a correct default for
+everyone self-hosting this — so first launch sends you to Settings
+rather than silently trying (and failing against) someone else's server.
 
 ## Project structure
 
@@ -395,11 +463,15 @@ src/
 │   ├── ConversationListScreen.tsx
 │   ├── ChatScreen.tsx
 │   ├── QueueScreen.tsx
+│   ├── TransferDetailScreen.tsx        # read-only preview + assign/reassign
 │   ├── AssignAgentScreen.tsx
 │   └── ProfileScreen.tsx
+├── components/
+│   ├── MessageBubble.tsx               # chat bubble incl. status ticks
+│   └── AppVersionInfo.tsx              # version/build/active-OTA-update display
 ├── theme.ts                          # shared WhatsApp-style design tokens
 ├── utils/
-│   └── formatTimestamp.ts              # WhatsApp-style relative timestamps
+│   └── formatTimestamp.ts              # list-row, date-separator, and section-key formatting
 └── config.ts
 ```
 
@@ -408,7 +480,8 @@ src/
 - **"Incorrect email or password"** — exactly what it says; this is a real
   login now, same credentials as the web dashboard.
 - **"Could not reach the server"** — check the phone's network can reach
-  `whatomate.consyst.biz` and the droplet's firewall allows inbound HTTPS.
+  whichever server URL is set in Settings, and that its firewall allows
+  inbound HTTPS.
 - **Blank conversation list** — you only see contacts already *assigned*
   to your account (`assigned_user_id`). An unassigned contact won't show
   up even though it exists.

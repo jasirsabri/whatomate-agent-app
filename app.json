@@ -12,9 +12,9 @@
       "buildNumber": "1"
     },
     "android": {
-      "package": "biz.consyst.whatomateagent",
+      "package": "com.xgenbusiness.whatomateagent",
       "googleServicesFile": "./google-services.json",
-      "versionCode": 2,
+      "versionCode": 1,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",

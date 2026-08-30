@@ -157,7 +157,7 @@ export default function SettingsScreen() {
         </Text>
         <TextInput
           style={styles.input}
-          placeholder={DEFAULT_SERVER_URL}
+          placeholder="https://your-whatomate-instance.example.com"
           autoCapitalize="none"
           autoCorrect={false}
           keyboardType="url"
@@ -198,12 +198,13 @@ export default function SettingsScreen() {
         <Text style={styles.sectionLabel}>Push Notification Server</Text>
         <Text style={styles.helpText}>
           A separate, self-hosted service that makes background push
-          notifications work — not part of Whatomate itself. You shouldn't
-          normally need to change this.
+          notifications work — not part of Whatomate itself (see
+          whatomate-push-bridge on GitHub). Ask whoever runs your Whatomate
+          instance for this address if you're not sure.
         </Text>
         <TextInput
           style={styles.input}
-          placeholder={DEFAULT_PUSH_BRIDGE_URL}
+          placeholder="https://your-push-bridge.example.com"
           autoCapitalize="none"
           autoCorrect={false}
           keyboardType="url"

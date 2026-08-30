@@ -5,10 +5,12 @@ const CONTACT_TAG_STORAGE_KEY = 'whatomate_contact_tag';
 const TEAM_NAME_STORAGE_KEY = 'whatomate_team_name';
 const PUSH_BRIDGE_URL_STORAGE_KEY = 'whatomate_push_bridge_url';
 
-// Used on first launch, and as the "Reset to default" target in Settings.
-// Existing Consyst users don't need to configure anything; anyone at a
-// different Whatomate org changes this once from the Settings screen.
-export const DEFAULT_SERVER_URL = 'https://whatomate.consyst.biz';
+// Intentionally blank rather than any one org's real server — this build
+// is meant to work for anyone self-hosting Whatomate, not just Consyst, so
+// there's no org-specific value that would be a correct default for
+// everyone. First launch sends people to the Settings screen instead of
+// silently trying (and failing against) an address that isn't theirs.
+export const DEFAULT_SERVER_URL = '';
 
 // This app is scoped to one team's use — these two defaults are what make
 // the conversation list and queue show only that team's data. They're
@@ -18,10 +20,10 @@ export const DEFAULT_CONTACT_TAG = 'Customer';
 export const DEFAULT_TEAM_NAME = 'Sales Team';
 
 // The push bridge is a separate, self-hosted service (not part of
-// Whatomate itself) — see whatomate-push-bridge/README.md. Configurable
-// for the same reason as the other settings: a different org running
-// their own bridge shouldn't need a different app build.
-export const DEFAULT_PUSH_BRIDGE_URL = 'https://push.consyst.biz';
+// Whatomate itself) — see whatomate-push-bridge/README.md. Blank for the
+// same reason as DEFAULT_SERVER_URL: no single org's bridge URL is the
+// right default for everyone running their own instance.
+export const DEFAULT_PUSH_BRIDGE_URL = '';
 
 let serverUrl = DEFAULT_SERVER_URL;
 let contactTag = DEFAULT_CONTACT_TAG;

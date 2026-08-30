@@ -43,6 +43,10 @@ export default function LoginScreen({ navigation }: Props) {
   }, []);
 
   const handleSubmit = async () => {
+    if (!getServerUrl()) {
+      setError('Set your Whatomate server address first — tap "Server settings" below.');
+      return;
+    }
     if (!email.trim() || !password) {
       setError('Enter your email and password.');
       return;
@@ -71,7 +75,9 @@ export default function LoginScreen({ navigation }: Props) {
     >
       <Text style={styles.title}>Whatomate Agent</Text>
       <Text style={styles.subtitle}>Sign in with your Whatomate account</Text>
-      <Text style={styles.serverHint}>{getServerUrl().replace(/^https?:\/\//, '')}</Text>
+      <Text style={styles.serverHint}>
+        {getServerUrl() ? getServerUrl().replace(/^https?:\/\//, '') : 'No server configured yet — tap "Server settings" below'}
+      </Text>
 
       {sessionExpiredMessage ? (
         <Text style={styles.sessionExpired}>{sessionExpiredMessage}</Text>
