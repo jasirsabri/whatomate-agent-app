@@ -56,29 +56,49 @@ function mediaFallback(message: WhatomateMessage): { icon: keyof typeof Ionicons
   }
 }
 
+/** Reads a Blob to a base64 data: URI — RN polyfills FileReader
+ * specifically for this, since Blob objects themselves can't be handed
+ * to <Image> directly. */
+function blobToDataUri(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error('Failed to read blob'));
+    reader.onload = () => resolve(reader.result as string);
+    reader.readAsDataURL(blob);
+  });
+}
+
 /** GET /api/media/{message_id} requires the same Bearer auth as every
  * other endpoint (verified against Whatomate's ServeMedia handler) — the
  * message's own media_url field is just an internal storage path, never
- * a fetchable URL by itself. RN's Image supports a headers dict on its
- * source, so this fetches a fresh token once and renders once it's in
- * hand, rather than trying to attach auth to a plain <Image uri=...>. */
+ * a fetchable URL by itself. Deliberately NOT using <Image source={{uri,
+ * headers}}> — passing custom headers through Image's own network layer
+ * is a long-standing RN reliability problem, especially on Android — so
+ * this fetches the bytes itself (same networking path already proven to
+ * work for every other authenticated call in this app) and hands Image
+ * an already-loaded data: URI instead. */
 function MediaImage({ messageId }: { messageId: string }) {
-  const [authHeader, setAuthHeader] = useState<string | null>(null);
+  const [dataUri, setDataUri] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     let isActive = true;
-    ensureFreshAccessToken()
-      .then((token) => {
-        if (isActive) {
-          if (token) setAuthHeader(`Bearer ${token}`);
-          else setFailed(true);
-        }
-      })
-      .catch((err) => {
-        logApiError('Failed to get token for media image:', err);
+    (async () => {
+      try {
+        const token = await ensureFreshAccessToken();
+        if (!token) throw new Error('No access token available');
+        const response = await fetch(`${getServerUrl()}/api/media/${messageId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error(`Media fetch failed: ${response.status}`);
+        const blob = await response.blob();
+        const uri = await blobToDataUri(blob);
+        if (isActive) setDataUri(uri);
+      } catch (err) {
+        logApiError('Failed to load media image:', err);
         if (isActive) setFailed(true);
-      });
+      }
+    })();
     return () => {
       isActive = false;
     };
@@ -93,7 +113,7 @@ function MediaImage({ messageId }: { messageId: string }) {
     );
   }
 
-  if (!authHeader) {
+  if (!dataUri) {
     return (
       <View style={[styles.mediaImage, styles.mediaImageFallback]}>
         <ActivityIndicator size="small" color={colors.iconGray} />
@@ -105,10 +125,7 @@ function MediaImage({ messageId }: { messageId: string }) {
     <Image
       style={styles.mediaImage}
       resizeMode="cover"
-      source={{
-        uri: `${getServerUrl()}/api/media/${messageId}`,
-        headers: { Authorization: authHeader },
-      }}
+      source={{ uri: dataUri }}
       onError={() => setFailed(true)}
     />
   );
