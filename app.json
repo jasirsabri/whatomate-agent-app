@@ -3,7 +3,7 @@
     "name": "Whatomate Agent",
     "slug": "whatomate-agent-app",
     "owner": "xgenbusiness",
-    "version": "1.13.0",
+    "version": "1.14.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -27,7 +27,8 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-notifications"
+      "expo-notifications",
+      "expo-audio"
     ],
     "extra": {
       "eas": {

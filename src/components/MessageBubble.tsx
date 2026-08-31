@@ -1,9 +1,18 @@
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Image, StyleSheet, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Image,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { ensureFreshAccessToken } from '../api/client';
 import { getServerUrl } from '../config';
 import { logApiError } from '../api/logging';
+import ImageViewerModal from './ImageViewerModal';
+import VoiceMessagePlayer from './VoiceMessagePlayer';
 import { colors, radii, spacing } from '../theme';
 import type { WhatomateMessage } from '../types';
 
@@ -33,16 +42,14 @@ function formatBubbleTime(dateStr: string): string {
   return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
-/** Non-image media (video/audio/document/location/contact) — this app has
- * no player/viewer for these yet, just an honest "here's what this is"
- * placeholder instead of a blank bubble. Icon-only, no attempt at inline
- * playback. */
+/** Non-image, non-audio media (video/document/location/contact) — this
+ * app has no player/viewer for these yet, just an honest "here's what
+ * this is" placeholder instead of a blank bubble. Icon-only, no attempt
+ * at inline playback. */
 function mediaFallback(message: WhatomateMessage): { icon: keyof typeof Ionicons.glyphMap; label: string } {
   switch (message.message_type) {
     case 'video':
       return { icon: 'videocam-outline', label: 'Video' };
-    case 'audio':
-      return { icon: 'musical-notes-outline', label: 'Voice message' };
     case 'document':
       return { icon: 'document-text-outline', label: message.media_filename || 'Document' };
     case 'location':
@@ -77,9 +84,10 @@ function blobToDataUri(blob: Blob): Promise<string> {
  * this fetches the bytes itself (same networking path already proven to
  * work for every other authenticated call in this app) and hands Image
  * an already-loaded data: URI instead. */
-function MediaImage({ messageId }: { messageId: string }) {
+function MediaImage({ messageId, timestampLabel }: { messageId: string; timestampLabel: string }) {
   const [dataUri, setDataUri] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [viewerOpen, setViewerOpen] = useState(false);
 
   useEffect(() => {
     let isActive = true;
@@ -122,12 +130,22 @@ function MediaImage({ messageId }: { messageId: string }) {
   }
 
   return (
-    <Image
-      style={styles.mediaImage}
-      resizeMode="cover"
-      source={{ uri: dataUri }}
-      onError={() => setFailed(true)}
-    />
+    <>
+      <TouchableOpacity activeOpacity={0.85} onPress={() => setViewerOpen(true)}>
+        <Image
+          style={styles.mediaImage}
+          resizeMode="cover"
+          source={{ uri: dataUri }}
+          onError={() => setFailed(true)}
+        />
+      </TouchableOpacity>
+      <ImageViewerModal
+        visible={viewerOpen}
+        onClose={() => setViewerOpen(false)}
+        uri={dataUri}
+        timestampLabel={timestampLabel}
+      />
+    </>
   );
 }
 
@@ -136,6 +154,7 @@ export default function MessageBubble({ message }: { message: WhatomateMessage }
   const isFailed = message.status === 'failed';
   const hasMedia = Boolean(message.media_url);
   const isImage = hasMedia && message.message_type === 'image';
+  const isAudio = hasMedia && message.message_type === 'audio';
   // No omitempty on the Go side for content.body — a captionless media
   // message serializes as "" (present, empty), not omitted, so `??`
   // never falls back and previously rendered a genuinely blank bubble.
@@ -147,7 +166,9 @@ export default function MessageBubble({ message }: { message: WhatomateMessage }
     <View style={styles.bubbleRow}>
       <View style={[styles.bubble, isOutgoing ? styles.bubbleOutgoing : styles.bubbleIncoming]}>
         {isImage ? (
-          <MediaImage messageId={message.id} />
+          <MediaImage messageId={message.id} timestampLabel={formatBubbleTime(message.created_at)} />
+        ) : isAudio ? (
+          <VoiceMessagePlayer messageId={message.id} isOutgoing={isOutgoing} />
         ) : hasMedia ? (
           (() => {
             const fallback = mediaFallback(message);
